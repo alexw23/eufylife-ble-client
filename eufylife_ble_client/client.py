@@ -326,11 +326,11 @@ class EufyLifeBLEDevice:
         if self._model_id in ["eufy T9130", "eufy T9150"]:
             if len(data) >= 18 and data[10] in [0x01, 0x05]:
                 self._handle_advertisement_weight_update_t9130_t9150(data)
-        elif self._model_id in ["eufy T9146", "eufy T9147"]:
+        elif self._model_id in ["eufy T9120", "eufy T9146", "eufy T9147"]:
             if len(data) == 18 and data[4] == 0xCF:
                 data_range = data[4:15]
                 if util.validate_checksum(data_range):
-                    self._handle_weight_update_t9146_t9147(data_range)
+                    self._handle_weight_update_t9120_t9146_t9147(data_range)
         elif self._model_id in ["eufy T9148", "eufy T9149"]:
             if len(data) == 19 and data[6] == 0xCF:
                 self._handle_advertisement_weight_update_t9148_t9149(data[6:])
