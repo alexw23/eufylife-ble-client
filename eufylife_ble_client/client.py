@@ -336,7 +336,7 @@ class EufyLifeBLEDevice:
                     weight_kg=self._state.weight_kg if self._state else None,
                     final_weight_kg=self._state.final_weight_kg if self._state else None,
                     heart_rate=None,
-                    max_weight_exceeded=False,
+                    weight_limit_exceeded=False,
                     impedance=impedance
                 )
             )
@@ -345,7 +345,7 @@ class EufyLifeBLEDevice:
             weight_kg = ((data[4] << 8) | data[3]) / 100
             is_final = data[9] == 0x00
             final_weight_kg = weight_kg if is_final else None
-            max_weight_exceeded = data[9] == 0x02
+            weight_limit_exceeded = data[9] == 0x02
     
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
