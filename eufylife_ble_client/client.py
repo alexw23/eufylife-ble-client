@@ -397,6 +397,8 @@ class EufyLifeBLEDevice:
                 self._handle_weight_update_t9148_t9149(data)
 
     async def _read_battery_level(self):
+        if self._battery_char is None:
+            return
         battery_bytes = await self._client.read_gatt_char(self._battery_char)
         if len(battery_bytes) == 1:
             self._battery_level = battery_bytes[0]
@@ -456,7 +458,7 @@ class EufyLifeBLEDevice:
         self._write_char = self._resolve_characteristic(services, self._model.write_characteristics)
         self._battery_char = self._resolve_characteristic(services, self._model.battery_characteristics)
 
-        return bool((self._auth_char or len(self._model.auth_characteristics) == 0) and self._notify_char and self._write_char and self._battery_char)
+        return bool((self._auth_char or len(self._model.auth_characteristics) == 0) and self._notify_char and self._write_char)
 
     def _resolve_characteristic(self, services: BleakGATTServiceCollection, candidate_characteristics: list[str]):
         for characteristic in candidate_characteristics:
