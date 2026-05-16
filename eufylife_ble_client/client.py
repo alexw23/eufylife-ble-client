@@ -324,59 +324,47 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # Weight is always extracted from bytes [3] and [4] across all packets
+        # 1. Always extract the live scrolling weight from bytes [3] and [4]
         weight_kg = ((data[4] << 8) | data[3]) / 100
     
-        # Pull existing final weight from state so we don't accidentally wipe it out
+        # 2. Safely read what Home Assistant already knows about our current state
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
+        weight_limit_exceeded = data[9] == 0x02
     
+        # 3. Check if THIS specific packet is the scale's official final weight lock-in
+        # In standard packets, data[9] == 0x00 means "Weight Locked!"
+        is_weight_packet_final = (data[2] != 0x13 and data[9] == 0x00)
+    
+        if is_weight_packet_final:
+            # If the scale says locked, commit it to state immediately
+            final_weight_kg = weight_kg
+        else:
+            # Otherwise, preserve whatever final weight we previously locked in
+            final_weight_kg = current_final
+    
+        # 4. Process Impedance if this is a BIA data stream packet
         if data[2] == 0x13:
-            # --- Pathway A: BIA / Impedance Packet ---
-            # Extract the true 24-bit packed calibration payload (bytes 5, 6, 7)
+            # Extract the true 24-bit factory calibration register
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
             
-            # Apply the mathematically verified factory calibration mapping
+            # Apply our unmasked factory calibration equation
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
-            # Biological boundary guard to prevent ghost anomalies
+            # Human boundary guard (250-900 Ohms) to filter noise
             if 250.0 <= calibrated_ohms <= 900.0:
                 current_impedance = round(calibrated_ohms, 1)
     
-            # Ensure final weight doesn't get wiped out during the BIA stream
-            # If we haven't locked a final weight yet, use the current stable reading
-            if current_final is None:
-                current_final = weight_kg
-    
-            self._set_state_and_fire_callbacks(
-                EufyLifeBLEState(
-                    weight_kg=weight_kg,
-                    final_weight_kg=current_final,
-                    heart_rate=None,
-                    weight_limit_exceeded=False,
-                    impedance=current_impedance
-                )
+        # 5. Fire the callback immediately to update Home Assistant state in real-time
+        self._set_state_and_fire_callbacks(
+            EufyLifeBLEState(
+                weight_kg=weight_kg,
+                final_weight_kg=final_weight_kg,  # Appears instantly on weight lock, no gating!
+                heart_rate=None,
+                weight_limit_exceeded=weight_limit_exceeded,
+                impedance=current_impedance        # Appears seamlessly whenever BIA finishes
             )
-        else:
-            # --- Pathway B: Standard Weight Packet ---
-            is_final = data[9] == 0x00
-            final_weight_kg = weight_kg if is_final else None
-            weight_limit_exceeded = data[9] == 0x02
-    
-            # If we already locked a final weight in a previous frame, don't let a
-            # fluctuating "non-final" live packet overwrite it with None
-            if not is_final and current_final is not None:
-                final_weight_kg = current_final
-    
-            self._set_state_and_fire_callbacks(
-                EufyLifeBLEState(
-                    weight_kg=weight_kg,
-                    final_weight_kg=final_weight_kg,
-                    heart_rate=None,
-                    weight_limit_exceeded=weight_limit_exceeded,
-                    impedance=current_impedance # Retain impedance if already populated
-                )
-            )
+        )
             
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
