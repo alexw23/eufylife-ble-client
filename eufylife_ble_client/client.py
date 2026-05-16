@@ -211,7 +211,6 @@ class EufyLifeBLEDevice:
             return
     
         async with self._connect_lock:
-            # Check again while holding the lock
             if self.is_connected:
                 self._reset_disconnect_timer()
                 return
@@ -229,16 +228,17 @@ class EufyLifeBLEDevice:
     
             _LOGGER.debug("%s: Connected", self._model_id)
     
-            # Optional: give flaky BLE devices a brief moment to settle
-            await asyncio.sleep(0.25)
-    
             resolved = self._resolve_characteristics(client.services)
             if not resolved:
-                # Force a fresh service discovery if cached services are incomplete
-                resolved = self._resolve_characteristics(await client.get_services())
+                resolved = self._resolve_characteristics(
+                    await client.get_services()
+                )
     
             if not resolved:
-                _LOGGER.debug("%s: Failed to resolve characteristics", self._model_id)
+                _LOGGER.debug(
+                    "%s: Failed to resolve characteristics",
+                    self._model_id,
+                )
                 await client.disconnect()
                 return
     
@@ -268,12 +268,11 @@ class EufyLifeBLEDevice:
                     e,
                 )
     
+                self._client = None
+    
                 if client.is_connected:
                     await client.disconnect()
-    
-                self._client = None
-                return
-
+                    
     async def _authenticate_if_needed(self):
         if self._model_id not in ["eufy T9148", "eufy T9149"]:
             return
@@ -466,7 +465,7 @@ class EufyLifeBLEDevice:
 
     def _disconnected_callback(self, client: BleakClientWithServiceCache) -> None:
         """Disconnected callback."""
-        self._state = None
+        self._state = EufyLifeBLEState()
         _LOGGER.debug(
             "%s: Disconnected from device", self._model_id
         )
