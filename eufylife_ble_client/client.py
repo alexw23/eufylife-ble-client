@@ -324,65 +324,58 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # 1. Always extract the live weight from the data stream
+        # 1. Grab the real-time scrolling weight (bytes 3 and 4)
         weight_kg = ((data[4] << 8) | data[3]) / 100
         packet_type = data[2]
         status_byte = data[9]
     
-        # Debug Log the raw packet stream arrival
-        _LOGGER.debug(
-            "T9120 BLE Packet Received: Type=0x%02X, Weight=%.2fkg, StatusByte=0x%02X, RawBytes=%s",
-            packet_type, weight_kg, status_byte, data.hex()
-        )
-    
-        # 2. Safely capture what Home Assistant currently holds in memory
+        # 2. Extract historical records from the last frozen state cache safely
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
         weight_limit_exceeded = (status_byte == 0x02)
     
-        # Base targets for this frame
-        final_weight_kg = current_final
+        # Initialize frame parameters
+        final_weight_kg = None
         impedance_ohms = current_impedance
     
         # --- BRANCH A: IMPEDANCE / BIA PACKET ---
         if packet_type == 0x13:
+            # Extract the true 24-bit factory calibration register
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
-            _LOGGER.debug("Processing BIA Stream: Raw Signal Register=%d, Computed Ohms=%.2f", raw_signal, calibrated_ohms)
-    
             if 250.0 <= calibrated_ohms <= 900.0:
                 impedance_ohms = round(calibrated_ohms, 1)
             
-            # BIA packets only arrive after weight has stopped moving, so it is final
+            # BIA packets occur post-stabilization, so the weight is final
             final_weight_kg = weight_kg
     
         # --- BRANCH B: STANDARD WEIGHT PACKET ---
         else:
-            # 0x00 is the universal lock flag across these microcontrollers
+            # 0x00 is the micro-controller hardware lock flag
             if status_byte == 0x00:
                 final_weight_kg = weight_kg
-                _LOGGER.info("Weight Locked and Finalized: %.2f kg", final_weight_kg)
+                _LOGGER.info("T9120 Hardware Weight Lock Triggered: %.2f kg", final_weight_kg)
             
-            # If the status byte is anything else, it's actively weighing or stabilizing.
-            # Clean out old cached final states so the new reading can flow instantly!
-            else:
+            # 0x01 means a new physical session has started, purge historical BIA
+            elif status_byte == 0x01:
                 final_weight_kg = None
                 impedance_ohms = None
+                
+            # Any other status byte means active, live stabilization.
+            # Keeping final_weight_kg as None tells HA to ignore this frame for the Final Weight sensor,
+            # keeping the dashboard steady while the real-time sensor streams live!
+            else:
+                final_weight_kg = None
     
-        # 3. Build and push the fresh frozen state instance
-        _LOGGER.debug(
-            "Firing State Update: LiveWeight=%.2fkg, FinalWeight=%s, Impedance=%s",
-            weight_kg, final_weight_kg, impedance_ohms
-        )
-    
+        # 3. Fire the immutable state instance directly to the Home Assistant handlers
         self._set_state_and_fire_callbacks(
             EufyLifeBLEState(
-                weight_kg=weight_kg,
-                final_weight_kg=final_weight_kg,
+                weight_kg=weight_kg,              # Streams to your Real-Time sensor frame-by-frame
+                final_weight_kg=final_weight_kg,  # Safely hits or bypasses the RestoreSensor gate
                 heart_rate=None,
                 weight_limit_exceeded=weight_limit_exceeded,
-                impedance=impedance_ohms
+                impedance=impedance_ohms           # Updates your impedance entity smoothly
             )
         )
             
