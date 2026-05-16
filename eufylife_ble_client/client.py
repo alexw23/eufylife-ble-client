@@ -324,61 +324,67 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # 1. Always extract the live weight — it is available across ALL packet types
+        # 1. Always extract the live weight from the data stream
         weight_kg = ((data[4] << 8) | data[3]) / 100
+        packet_type = data[2]
+        status_byte = data[9]
     
-        # 2. Safely read what Home Assistant currently holds in memory
+        # Debug Log the raw packet stream arrival
+        _LOGGER.debug(
+            "T9120 BLE Packet Received: Type=0x%02X, Weight=%.2fkg, StatusByte=0x%02X, RawBytes=%s",
+            packet_type, weight_kg, status_byte, data.hex()
+        )
+    
+        # 2. Safely capture what Home Assistant currently holds in memory
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
-        weight_limit_exceeded = data[9] == 0x02
+        weight_limit_exceeded = (status_byte == 0x02)
     
-        # --- BRANCH A: IMPEDANCE REPORTING ---
-        if data[2] == 0x13:
-            # Extract the true 24-bit factory calibration register
+        # Base targets for this frame
+        final_weight_kg = current_final
+        impedance_ohms = current_impedance
+    
+        # --- BRANCH A: IMPEDANCE / BIA PACKET ---
+        if packet_type == 0x13:
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
-            
-            # Apply the mathematically verified calibration formula
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
+            _LOGGER.debug("Processing BIA Stream: Raw Signal Register=%d, Computed Ohms=%.2f", raw_signal, calibrated_ohms)
+    
             if 250.0 <= calibrated_ohms <= 900.0:
-                current_impedance = round(calibrated_ohms, 1)
-    
-            # Since it's computing impedance, the weight has naturally locked in
-            final_weight_kg = weight_kg if current_final is None else current_final
-    
-            self._set_state_and_fire_callbacks(
-                EufyLifeBLEState(
-                    weight_kg=weight_kg,           # Keeps real-time weight fluid
-                    final_weight_kg=final_weight_kg,
-                    heart_rate=None,
-                    weight_limit_exceeded=False,
-                    impedance=current_impedance
-                )
-            )
-    
-        # --- BRANCH B: WEIGHT REPORTING ---
-        else:
-            is_final = data[9] == 0x00
-            is_actively_weighing = data[9] == 0x01
+                impedance_ohms = round(calibrated_ohms, 1)
             
-            if is_final:
-                final_weight_kg = weight_kg
-            elif is_actively_weighing:
-                # FORCE RESET: Clear out the historical cache because a new person/session has started!
-                final_weight_kg = None
-                current_impedance = None
-            else:
-                final_weight_kg = current_final
+            # BIA packets only arrive after weight has stopped moving, so it is final
+            final_weight_kg = weight_kg
     
-            self._set_state_and_fire_callbacks(
-                EufyLifeBLEState(
-                    weight_kg=weight_kg,
-                    final_weight_kg=final_weight_kg,
-                    heart_rate=None,
-                    weight_limit_exceeded=weight_limit_exceeded,
-                    impedance=current_impedance
-                )
+        # --- BRANCH B: STANDARD WEIGHT PACKET ---
+        else:
+            # 0x00 is the universal lock flag across these microcontrollers
+            if status_byte == 0x00:
+                final_weight_kg = weight_kg
+                _LOGGER.info("Weight Locked and Finalized: %.2f kg", final_weight_kg)
+            
+            # If the status byte is anything else, it's actively weighing or stabilizing.
+            # Clean out old cached final states so the new reading can flow instantly!
+            else:
+                final_weight_kg = None
+                impedance_ohms = None
+    
+        # 3. Build and push the fresh frozen state instance
+        _LOGGER.debug(
+            "Firing State Update: LiveWeight=%.2fkg, FinalWeight=%s, Impedance=%s",
+            weight_kg, final_weight_kg, impedance_ohms
+        )
+    
+        self._set_state_and_fire_callbacks(
+            EufyLifeBLEState(
+                weight_kg=weight_kg,
+                final_weight_kg=final_weight_kg,
+                heart_rate=None,
+                weight_limit_exceeded=weight_limit_exceeded,
+                impedance=impedance_ohms
             )
+        )
             
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
