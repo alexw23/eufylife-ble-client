@@ -143,6 +143,11 @@ class EufyLifeBLEDevice:
         return self._model_id == "eufy T9149"
 
     @property
+    def supports_impedance(self) -> bool:
+        """Return whether the device supports impedance measurements."""
+        return self._model_id == "eufy T9120"
+
+    @property
     def is_connected(self) -> bool:
         """Return whether the device is connected."""
         return self._client and self._client.is_connected
