@@ -145,7 +145,7 @@ class EufyLifeBLEDevice:
     @property
     def supports_impedance(self) -> bool:
         """Return whether the device supports impedance measurements."""
-        return self._model_id == "eufy T9120"
+        return self._model_id in ["eufy T9120", "eufy T9146", "eufy T9147"]
 
     @property
     def is_connected(self) -> bool:
@@ -320,67 +320,6 @@ class EufyLifeBLEDevice:
 
         self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, heart_rate, False))
 
-    def _decode_t9120_impedance(self, data: bytearray) -> float | None:
-        """Decode impedance from BIA packet bytes [5][6][7]."""
-        raw_24bit = (data[7] << 16) | (data[6] << 8) | data[5]
-        
-        esi = (raw_24bit >> 12) & 0xF
-        edi = raw_24bit & 0xF00
-        eax = (raw_24bit >> 16) & 0xFF
-        eax = eax | edi
-        edx_low = raw_24bit & 0xFF
-        edx_calc = esi + (edx_low * 4)
-        unpacked = (eax - edx_calc) & 0xFFFFFFFF
-        
-        # Handle signed 32-bit overflow
-        if unpacked >= 0x80000000:
-            unpacked -= 0x100000000
-        
-        impedance = unpacked * 0.5
-        
-        # Sanity check - human impedance is 200-1000Ω
-        if not 200 <= impedance <= 1000:
-            return None
-        
-        return round(impedance, 1)
-
-    def _handle_weight_update_t9120(self, data: bytearray) -> None:
-        if len(data) != 11 or data[0] != 0xCF:
-            return
-    
-        # BIA packet (data[2] == 0x13) - contains impedance
-        if data[2] == 0x13:
-            impedance = self._decode_t9120_impedance(data)
-            if impedance is None:
-                return
-    
-            self._set_state_and_fire_callbacks(
-                EufyLifeBLEState(
-                    weight_kg=self._state.weight_kg if self._state else None,
-                    final_weight_kg=self._state.final_weight_kg if self._state else None,
-                    heart_rate=None,
-                    weight_limit_exceeded=False,
-                    impedance=impedance,
-                )
-            )
-            return
-    
-        # Weight packet
-        weight_kg = ((data[4] << 8) | data[3]) / 100
-        is_final = data[9] == 0x00
-        final_weight_kg = weight_kg if is_final else None
-        weight_limit_exceeded = data[9] == 0x02
-    
-        self._set_state_and_fire_callbacks(
-            EufyLifeBLEState(
-                weight_kg=weight_kg,
-                final_weight_kg=final_weight_kg,
-                heart_rate=None,
-                weight_limit_exceeded=weight_limit_exceeded,
-                impedance=self._state.impedance if self._state else None,
-            )
-        )
-            
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
             return
@@ -391,16 +330,41 @@ class EufyLifeBLEDevice:
 
         self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, None, False))
 
-    def _handle_weight_update_t9146_t9147(self, data: bytearray) -> None:
+    def _handle_weight_update_t9120_t9146_t9147(self, data: bytearray) -> None:
+        """Handle weight + impedance packet for T9120, T9146, T9147.
+        
+        Packet structure (11 bytes):
+          [0]    0xCF signature
+          [1][2] impedance BE × 0.1 (in ohms)
+          [3][4] weight LE / 100 (in kg)
+          [9]    status: 0x00 = final, 0x01 = measuring, 0x02 = limit exceeded
+        """
         if len(data) != 11 or data[0] != 0xCF:
             return
-
+    
         weight_kg = ((data[4] << 8) | data[3]) / 100
         is_final = data[9] == 0x00
         final_weight_kg = weight_kg if is_final else None
         weight_limit_exceeded = data[9] == 0x02
-
-        self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, None, weight_limit_exceeded))
+    
+        # Impedance: bytes [1][2] BE × 0.1
+        raw_imp = ((data[2] << 8) | data[1]) * 0.1
+        
+        # Preserve previous impedance if this packet doesn't have a valid reading
+        if 200 <= raw_imp <= 1000:
+            impedance = raw_imp
+        else:
+            impedance = self._state.impedance if self._state else None
+    
+        self._set_state_and_fire_callbacks(
+            EufyLifeBLEState(
+                weight_kg=weight_kg,
+                final_weight_kg=final_weight_kg,
+                heart_rate=None,
+                weight_limit_exceeded=weight_limit_exceeded,
+                impedance=impedance,
+            )
+        )
 
     def _handle_weight_update_t9148_t9149(self, data: bytearray) -> None:
         if len(data) != 16 or data[0] != 0xCF or data[2] != 0x00:
@@ -426,11 +390,16 @@ class EufyLifeBLEDevice:
     def _notification_handler(self, _sender: int, data: bytearray) -> None:
         """Handle notification responses."""
         _LOGGER.debug("%s: Notification received: %s", self._model_id, data.hex())
-
-        if self._model_id == "eufy T9120":
+    
+        if self._model_id in ["eufy T9120", "eufy T9146", "eufy T9147"]:
+            # T9146/T9147 use checksum validation, T9120 doesn't
+            if self._model_id in ["eufy T9146", "eufy T9147"]:
+                if not util.validate_checksum(data):
+                    _LOGGER.debug("Checksum mismatch.")
+                    return
             if len(data) == 11 and data[0] == 0xCF:
-                self._handle_weight_update_t9120(data)
-        if self._model_id == "eufy T9140":
+                self._handle_weight_update_t9120_t9146_t9147(data)
+        elif self._model_id == "eufy T9140":
             if len(data) >= 2 and data[0] == 0xAC and data[1] == 0x02:
                 if len(data) == 16:
                     self._notification_handler(_sender, data[8:15])
@@ -441,12 +410,6 @@ class EufyLifeBLEDevice:
                 else:
                     if len(data) >= 7 and data[6] in [0xCA, 0xCE]:
                         self._handle_weight_update_t9140(data)
-        elif self._model_id in ["eufy T9146", "eufy T9147"]:
-            if not util.validate_checksum(data):
-                _LOGGER.debug("Checksum mismatch.")
-                return
-            if len(data) == 11 and data[0] == 0xCF:
-                self._handle_weight_update_t9146_t9147(data)
         elif self._model_id in ["eufy T9148", "eufy T9149"]:
             if len(data) == 16 and data[0] == 0xCF and data[2] == 0x00:
                 self._handle_weight_update_t9148_t9149(data)
