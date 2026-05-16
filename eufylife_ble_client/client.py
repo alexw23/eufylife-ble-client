@@ -29,7 +29,7 @@ MODEL_TO_NAME = {
 MODELS: dict[str, DeviceModel] = {
     "eufy T9120": DeviceModel(
         name="Smart Scale A1",
-        advertisement_data_contains_state=False,
+        advertisement_data_contains_state=True,
         auth_characteristics=[],
         notify_characteristics=["0000FFF4-0000-1000-8000-00805f9b34fb"],
         write_characteristics=["0000FFF1-0000-1000-8000-00805f9b34fb"],
