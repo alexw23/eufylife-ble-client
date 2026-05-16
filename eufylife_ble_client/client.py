@@ -221,7 +221,7 @@ class EufyLifeBLEDevice:
             resolved = self._resolve_characteristics(client.services)
             if not resolved:
                 # Try to handle services failing to load
-                resolved = self._resolve_characteristics(await client.get_services())
+                resolved = self._resolve_characteristics(client.services)
 
             self._client = client
             self._reset_disconnect_timer()
