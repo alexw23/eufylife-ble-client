@@ -324,38 +324,51 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        is_bia = (
-            data[2] == 0x13 and
-            data[8] == 0x00 and
-            data[9] == 0x00
-        )
+        # Weight is transmitted in bytes [3] and [4] in BOTH packet types
+        weight_kg = ((data[4] << 8) | data[3]) / 100
     
-        if is_bia:
-            impedance = ((data[4] << 8) | data[3]) / 10
+        # Get existing values from state so we don't overwrite them with None
+        current_weight = self._state.weight_kg if self._state else weight_kg
+        current_final = self._state.final_weight_kg if self._state else None
+        current_impedance = self._state.impedance if self._state else None
+    
+        if data[2] == 0x13:
+            # BIA packet — Weight is still in [3][4], Impedance is typically in [5][6] or [6][7]
+            # Let's extract bytes [5] and [6]. Adjust if your scale uses a /10 multiplier.
+            raw_impedance = (data[6] << 8) | data[5] 
+            
+            # Validation guard: Impedance is rarely below 300 or above 1000 ohms
+            if 300 <= raw_impedance <= 1500:
+                current_impedance = raw_impedance
+            else:
+                # Fallback if your specific firmware uses bytes [6][7]
+                current_impedance = (data[7] << 8) | data[6]
     
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
-                    weight_kg=self._state.weight_kg if self._state else None,
-                    final_weight_kg=self._state.final_weight_kg if self._state else None,
+                    weight_kg=current_weight,
+                    final_weight_kg=current_final,
                     heart_rate=None,
                     weight_limit_exceeded=False,
-                    impedance=impedance,
+                    impedance=current_impedance
                 )
             )
         else:
-            weight_kg = ((data[4] << 8) | data[3]) / 100
-            status = data[9]
+            # Standard Weight packet
+            is_final = data[9] == 0x00
+            final_weight_kg = weight_kg if is_final else None
+            weight_limit_exceeded = data[9] == 0x02
     
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
                     weight_kg=weight_kg,
-                    final_weight_kg=weight_kg if status == 0x00 else None,
+                    final_weight_kg=final_weight_kg,
                     heart_rate=None,
-                    weight_limit_exceeded=status == 0x02,
-                    impedance=None,
+                    weight_limit_exceeded=weight_limit_exceeded,
+                    impedance=current_impedance  # Retain impedance if we already have it
                 )
             )
-
+            
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
             return
