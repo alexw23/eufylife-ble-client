@@ -324,47 +324,50 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # 1. Always extract the live scrolling weight from bytes [3] and [4]
-        weight_kg = ((data[4] << 8) | data[3]) / 100
-    
-        # 2. Safely read what Home Assistant already knows about our current state
+        # 1. Safely pull existing values from the last frozen state cache before it's replaced
+        current_weight = self._state.weight_kg if self._state else None
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
-        weight_limit_exceeded = data[9] == 0x02
     
-        # 3. Check if THIS specific packet is the scale's official final weight lock-in
-        # In standard packets, data[9] == 0x00 means "Weight Locked!"
-        is_weight_packet_final = (data[2] != 0x13 and data[9] == 0x00)
-    
-        if is_weight_packet_final:
-            # If the scale says locked, commit it to state immediately
-            final_weight_kg = weight_kg
-        else:
-            # Otherwise, preserve whatever final weight we previously locked in
-            final_weight_kg = current_final
-    
-        # 4. Process Impedance if this is a BIA data stream packet
+        # --- BRANCH A: IMPEDANCE REPORTING ---
         if data[2] == 0x13:
-            # Extract the true 24-bit factory calibration register
+            # Extract the true 24-bit factory calibration register (bytes 5, 6, 7)
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
-            
-            # Apply our unmasked factory calibration equation
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
-            # Human boundary guard (250-900 Ohms) to filter noise
             if 250.0 <= calibrated_ohms <= 900.0:
                 current_impedance = round(calibrated_ohms, 1)
     
-        # 5. Fire the callback immediately to update Home Assistant state in real-time
-        self._set_state_and_fire_callbacks(
-            EufyLifeBLEState(
-                weight_kg=weight_kg,
-                final_weight_kg=final_weight_kg,  # Appears instantly on weight lock, no gating!
-                heart_rate=None,
-                weight_limit_exceeded=weight_limit_exceeded,
-                impedance=current_impedance        # Appears seamlessly whenever BIA finishes
+            # Build a fresh state: Update impedance, but carry weight variables across
+            self._set_state_and_fire_callbacks(
+                EufyLifeBLEState(
+                    weight_kg=current_weight,       # Retain live weight from previous weight frame
+                    final_weight_kg=current_final,   # Retain final weight from previous lock frame
+                    heart_rate=None,
+                    weight_limit_exceeded=False,
+                    impedance=current_impedance      # Apply new calibrated Ohms
+                )
             )
-        )
+    
+        # --- BRANCH B: WEIGHT REPORTING ---
+        else:
+            weight_kg = ((data[4] << 8) | data[3]) / 100
+            is_final = data[9] == 0x00
+            weight_limit_exceeded = data[9] == 0x02
+            
+            # Lock final weight if this packet is the lock-in byte, otherwise carry forward historical final
+            final_weight_kg = weight_kg if is_final else current_final
+    
+            # Build a fresh state: Update weight metrics, but carry old impedance across
+            self._set_state_and_fire_callbacks(
+                EufyLifeBLEState(
+                    weight_kg=weight_kg,             # Update active scrolling weight
+                    final_weight_kg=final_weight_kg, # Update/retain final locked weight
+                    heart_rate=None,
+                    weight_limit_exceeded=weight_limit_exceeded,
+                    impedance=current_impedance      # Retain previously computed Ohms
+                )
+            )
             
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
