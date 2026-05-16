@@ -203,16 +203,21 @@ class EufyLifeBLEDevice:
         if self._connect_lock.locked():
             _LOGGER.debug(
                 "%s: Connection already in progress, waiting for it to complete",
-                self._model_id
+                self._model_id,
             )
+    
         if self.is_connected:
             self._reset_disconnect_timer()
             return
+    
         async with self._connect_lock:
+            # Check again while holding the lock
             if self.is_connected:
                 self._reset_disconnect_timer()
                 return
+    
             _LOGGER.debug("%s: Connecting", self._model_id)
+    
             client = await establish_connection(
                 BleakClientWithServiceCache,
                 self._ble_device,
@@ -221,22 +226,51 @@ class EufyLifeBLEDevice:
                 use_services_cache=True,
                 ble_device_callback=lambda: self._ble_device,
             )
+    
             _LOGGER.debug("%s: Connected", self._model_id)
+    
+            # Optional: give flaky BLE devices a brief moment to settle
+            await asyncio.sleep(0.25)
+    
             resolved = self._resolve_characteristics(client.services)
             if not resolved:
-                resolved = self._resolve_characteristics(client.services)
+                # Force a fresh service discovery if cached services are incomplete
+                resolved = self._resolve_characteristics(await client.get_services())
+    
+            if not resolved:
+                _LOGGER.debug("%s: Failed to resolve characteristics", self._model_id)
+                await client.disconnect()
+                return
     
             self._client = client
             self._reset_disconnect_timer()
     
             _LOGGER.debug("%s: Subscribe to notifications", self._model_id)
+    
             try:
-                await client.start_notify(self._notify_char, self._notification_handler)
+                await client.start_notify(
+                    self._notify_char,
+                    self._notification_handler,
+                )
+    
                 if self._auth_char is not None:
-                    await client.start_notify(self._auth_char, self._notification_handler_auth)
+                    await client.start_notify(
+                        self._auth_char,
+                        self._notification_handler_auth,
+                    )
+    
                 await self._authenticate_if_needed()
-            except BleakDBusError as e:
-                _LOGGER.debug("%s: Scale disconnected during setup: %s", self._model_id, e)
+    
+            except (BleakDBusError, EOFError) as e:
+                _LOGGER.debug(
+                    "%s: Scale disconnected during setup: %s",
+                    self._model_id,
+                    e,
+                )
+    
+                if client.is_connected:
+                    await client.disconnect()
+    
                 self._client = None
                 return
 
