@@ -324,48 +324,59 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # 1. Safely pull existing values from the last frozen state cache before it's replaced
-        current_weight = self._state.weight_kg if self._state else None
+        # 1. Always extract the live weight — it is available across ALL packet types
+        weight_kg = ((data[4] << 8) | data[3]) / 100
+    
+        # 2. Safely read what Home Assistant currently holds in memory
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
+        weight_limit_exceeded = data[9] == 0x02
     
         # --- BRANCH A: IMPEDANCE REPORTING ---
         if data[2] == 0x13:
-            # Extract the true 24-bit factory calibration register (bytes 5, 6, 7)
+            # Extract the true 24-bit factory calibration register
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
+            
+            # Apply the mathematically verified calibration formula
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
             if 250.0 <= calibrated_ohms <= 900.0:
                 current_impedance = round(calibrated_ohms, 1)
     
-            # Build a fresh state: Update impedance, but carry weight variables across
+            # Since it's computing impedance, the weight has naturally locked in
+            final_weight_kg = weight_kg if current_final is None else current_final
+    
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
-                    weight_kg=current_weight,       # Retain live weight from previous weight frame
-                    final_weight_kg=current_final,   # Retain final weight from previous lock frame
+                    weight_kg=weight_kg,           # Keeps real-time weight fluid
+                    final_weight_kg=final_weight_kg,
                     heart_rate=None,
                     weight_limit_exceeded=False,
-                    impedance=current_impedance      # Apply new calibrated Ohms
+                    impedance=current_impedance
                 )
             )
     
         # --- BRANCH B: WEIGHT REPORTING ---
         else:
-            weight_kg = ((data[4] << 8) | data[3]) / 100
             is_final = data[9] == 0x00
-            weight_limit_exceeded = data[9] == 0x02
+            is_actively_weighing = data[9] == 0x01
             
-            # Lock final weight if this packet is the lock-in byte, otherwise carry forward historical final
-            final_weight_kg = weight_kg if is_final else current_final
+            if is_final:
+                final_weight_kg = weight_kg
+            elif is_actively_weighing:
+                # FORCE RESET: Clear out the historical cache because a new person/session has started!
+                final_weight_kg = None
+                current_impedance = None
+            else:
+                final_weight_kg = current_final
     
-            # Build a fresh state: Update weight metrics, but carry old impedance across
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
-                    weight_kg=weight_kg,             # Update active scrolling weight
-                    final_weight_kg=final_weight_kg, # Update/retain final locked weight
+                    weight_kg=weight_kg,
+                    final_weight_kg=final_weight_kg,
                     heart_rate=None,
                     weight_limit_exceeded=weight_limit_exceeded,
-                    impedance=current_impedance      # Retain previously computed Ohms
+                    impedance=current_impedance
                 )
             )
             
