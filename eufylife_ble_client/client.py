@@ -320,62 +320,64 @@ class EufyLifeBLEDevice:
 
         self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, heart_rate, False))
 
+    def _decode_t9120_impedance(self, data: bytearray) -> float | None:
+        """Decode Holtek impedance from BIA packet bytes [5][6][7]."""
+        raw_24bit = (data[7] << 16) | (data[6] << 8) | data[5]
+        
+        esi = (raw_24bit >> 12) & 0xF
+        edi = raw_24bit & 0xF00
+        eax = (raw_24bit >> 16) & 0xFF
+        eax = eax | edi
+        edx_low = raw_24bit & 0xFF
+        edx_calc = esi + (edx_low * 4)
+        unpacked = (eax - edx_calc) & 0xFFFFFFFF
+        
+        # Handle signed 32-bit overflow
+        if unpacked >= 0x80000000:
+            unpacked -= 0x100000000
+        
+        impedance = unpacked * 0.5
+        
+        # Sanity check - human impedance is 200-1000Ω
+        if not 200 <= impedance <= 1000:
+            return None
+        
+        return round(impedance, 1)
+
     def _handle_weight_update_t9120(self, data: bytearray) -> None:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # 1. Grab the real-time scrolling weight (bytes 3 and 4)
+        # BIA packet (data[2] == 0x13) - contains impedance
+        if data[2] == 0x13:
+            impedance = self._decode_t9120_impedance(data)
+            if impedance is None:
+                return
+    
+            self._set_state_and_fire_callbacks(
+                EufyLifeBLEState(
+                    weight_kg=self._state.weight_kg if self._state else None,
+                    final_weight_kg=self._state.final_weight_kg if self._state else None,
+                    heart_rate=None,
+                    weight_limit_exceeded=False,
+                    impedance=impedance,
+                )
+            )
+            return
+    
+        # Weight packet
         weight_kg = ((data[4] << 8) | data[3]) / 100
-        packet_type = data[2]
-        status_byte = data[9]
+        is_final = data[9] == 0x00
+        final_weight_kg = weight_kg if is_final else None
+        weight_limit_exceeded = data[9] == 0x02
     
-        # 2. Extract historical records from the last frozen state cache safely
-        current_final = self._state.final_weight_kg if self._state else None
-        current_impedance = self._state.impedance if self._state else None
-        weight_limit_exceeded = (status_byte == 0x02)
-    
-        # Initialize frame parameters
-        final_weight_kg = None
-        impedance_ohms = current_impedance
-    
-        # --- BRANCH A: IMPEDANCE / BIA PACKET ---
-        if packet_type == 0x13:
-            # Extract the true 24-bit factory calibration register
-            raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
-            calibrated_ohms = (0.00002443 * raw_signal) + 233.91
-            
-            if 250.0 <= calibrated_ohms <= 900.0:
-                impedance_ohms = round(calibrated_ohms, 1)
-            
-            # BIA packets occur post-stabilization, so the weight is final
-            final_weight_kg = weight_kg
-    
-        # --- BRANCH B: STANDARD WEIGHT PACKET ---
-        else:
-            # 0x00 is the micro-controller hardware lock flag
-            if status_byte == 0x00:
-                final_weight_kg = weight_kg
-                _LOGGER.info("T9120 Hardware Weight Lock Triggered: %.2f kg", final_weight_kg)
-            
-            # 0x01 means a new physical session has started, purge historical BIA
-            elif status_byte == 0x01:
-                final_weight_kg = None
-                impedance_ohms = None
-                
-            # Any other status byte means active, live stabilization.
-            # Keeping final_weight_kg as None tells HA to ignore this frame for the Final Weight sensor,
-            # keeping the dashboard steady while the real-time sensor streams live!
-            else:
-                final_weight_kg = None
-    
-        # 3. Fire the immutable state instance directly to the Home Assistant handlers
         self._set_state_and_fire_callbacks(
             EufyLifeBLEState(
-                weight_kg=weight_kg,              # Streams to your Real-Time sensor frame-by-frame
-                final_weight_kg=final_weight_kg,  # Safely hits or bypasses the RestoreSensor gate
+                weight_kg=weight_kg,
+                final_weight_kg=final_weight_kg,
                 heart_rate=None,
                 weight_limit_exceeded=weight_limit_exceeded,
-                impedance=impedance_ohms           # Updates your impedance entity smoothly
+                impedance=self._state.impedance if self._state else None,
             )
         )
             
