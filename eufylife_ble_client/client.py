@@ -318,13 +318,39 @@ class EufyLifeBLEDevice:
     def _handle_weight_update_t9120(self, data: bytearray) -> None:
         if len(data) != 11 or data[0] != 0xCF:
             return
-
-        weight_kg = ((data[4] << 8) | data[3]) / 100
-        is_final = data[9] == 0x00
-        final_weight_kg = weight_kg if is_final else None
-        weight_limit_exceeded = data[9] == 0x02
-
-        self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, None, weight_limit_exceeded))
+    
+        # Check if this is a BIA packet (bytes [8][9] are 0x00 0x00 and data[2] != 0x00)
+        # Weight packet: data[2] = 0x00, data[9] = 0x01 (measuring) or 0x00 (final)
+        # BIA packet:    data[2] = 0x13 (fixed marker)
+    
+        if data[2] == 0x13:
+            # BIA packet — extract impedance from bytes [3][4] LE /10
+            impedance = ((data[4] << 8) | data[3])  # raw value, divide by 10 for ohms
+            self._set_state_and_fire_callbacks(
+                EufyLifeBLEState(
+                    weight_kg=self._state.weight_kg if self._state else None,
+                    final_weight_kg=self._state.final_weight_kg if self._state else None,
+                    heart_rate=None,
+                    weight_limit_exceeded=False,
+                    impedance=impedance
+                )
+            )
+        else:
+            # Weight packet
+            weight_kg = ((data[4] << 8) | data[3]) / 100
+            is_final = data[9] == 0x00
+            final_weight_kg = weight_kg if is_final else None
+            weight_limit_exceeded = data[9] == 0x02
+    
+            self._set_state_and_fire_callbacks(
+                EufyLifeBLEState(
+                    weight_kg=weight_kg,
+                    final_weight_kg=final_weight_kg,
+                    heart_rate=None,
+                    weight_limit_exceeded=weight_limit_exceeded,
+                    impedance=None
+                )
+            )
 
     def _handle_weight_update_t9140(self, data: bytearray) -> None:
         if len(data) < 7 or data[6] not in [0xCA, 0xCE]:
