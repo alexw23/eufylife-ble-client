@@ -324,30 +324,33 @@ class EufyLifeBLEDevice:
         if len(data) != 11 or data[0] != 0xCF:
             return
     
-        # Weight is transmitted in bytes [3] and [4] in BOTH packet types
+        # Weight is always extracted from bytes [3] and [4] across all packets
         weight_kg = ((data[4] << 8) | data[3]) / 100
     
-        # Get existing values from state so we don't overwrite them with None
-        current_weight = self._state.weight_kg if self._state else weight_kg
+        # Pull existing final weight from state so we don't accidentally wipe it out
         current_final = self._state.final_weight_kg if self._state else None
         current_impedance = self._state.impedance if self._state else None
     
         if data[2] == 0x13:
-            # BIA packet — Extract the true 24-bit packed calibration payload
+            # --- Pathway A: BIA / Impedance Packet ---
+            # Extract the true 24-bit packed calibration payload (bytes 5, 6, 7)
             raw_signal = (data[7] << 16) | (data[6] << 8) | data[5]
             
             # Apply the mathematically verified factory calibration mapping
-            # Maps the raw hardware universe into precise biological Ohms
             calibrated_ohms = (0.00002443 * raw_signal) + 233.91
             
-            # Universal biological safety guard for Home Assistant integrations
-            # (Ensures zero weird anomalies if the scale reads a ghost spike)
+            # Biological boundary guard to prevent ghost anomalies
             if 250.0 <= calibrated_ohms <= 900.0:
                 current_impedance = round(calibrated_ohms, 1)
     
+            # Ensure final weight doesn't get wiped out during the BIA stream
+            # If we haven't locked a final weight yet, use the current stable reading
+            if current_final is None:
+                current_final = weight_kg
+    
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
-                    weight_kg=current_weight,
+                    weight_kg=weight_kg,
                     final_weight_kg=current_final,
                     heart_rate=None,
                     weight_limit_exceeded=False,
@@ -355,10 +358,15 @@ class EufyLifeBLEDevice:
                 )
             )
         else:
-            # Standard Weight packet
+            # --- Pathway B: Standard Weight Packet ---
             is_final = data[9] == 0x00
             final_weight_kg = weight_kg if is_final else None
             weight_limit_exceeded = data[9] == 0x02
+    
+            # If we already locked a final weight in a previous frame, don't let a
+            # fluctuating "non-final" live packet overwrite it with None
+            if not is_final and current_final is not None:
+                final_weight_kg = current_final
     
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
@@ -366,7 +374,7 @@ class EufyLifeBLEDevice:
                     final_weight_kg=final_weight_kg,
                     heart_rate=None,
                     weight_limit_exceeded=weight_limit_exceeded,
-                    impedance=current_impedance  # Retain impedance if we already have it
+                    impedance=current_impedance # Retain impedance if already populated
                 )
             )
             
