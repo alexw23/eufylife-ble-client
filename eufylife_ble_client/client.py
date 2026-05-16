@@ -330,7 +330,7 @@ class EufyLifeBLEDevice:
     
         if data[2] == 0x13:
             # BIA packet — extract impedance from bytes [3][4] LE /10
-            impedance = ((data[4] << 8) | data[3])  # raw value, divide by 10 for ohms
+            impedance = ((data[4] << 8) | data[3]) / 10
             self._set_state_and_fire_callbacks(
                 EufyLifeBLEState(
                     weight_kg=self._state.weight_kg if self._state else None,
