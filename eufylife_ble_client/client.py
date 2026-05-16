@@ -321,7 +321,7 @@ class EufyLifeBLEDevice:
         self._set_state_and_fire_callbacks(EufyLifeBLEState(weight_kg, final_weight_kg, heart_rate, False))
 
     def _decode_t9120_impedance(self, data: bytearray) -> float | None:
-        """Decode Holtek impedance from BIA packet bytes [5][6][7]."""
+        """Decode impedance from BIA packet bytes [5][6][7]."""
         raw_24bit = (data[7] << 16) | (data[6] << 8) | data[5]
         
         esi = (raw_24bit >> 12) & 0xF
