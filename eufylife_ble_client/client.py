@@ -209,7 +209,6 @@ class EufyLifeBLEDevice:
             self._reset_disconnect_timer()
             return
         async with self._connect_lock:
-            # Check again while holding the lock
             if self.is_connected:
                 self._reset_disconnect_timer()
                 return
@@ -225,20 +224,21 @@ class EufyLifeBLEDevice:
             _LOGGER.debug("%s: Connected", self._model_id)
             resolved = self._resolve_characteristics(client.services)
             if not resolved:
-                # Try to handle services failing to load
                 resolved = self._resolve_characteristics(client.services)
-
+    
             self._client = client
             self._reset_disconnect_timer()
-
-            _LOGGER.debug(
-                "%s: Subscribe to notifications", self._model_id
-            )
-            await client.start_notify(self._notify_char, self._notification_handler)
-            if self._auth_char is not None:
-                await client.start_notify(self._auth_char, self._notification_handler_auth)
-
-            await self._authenticate_if_needed()
+    
+            _LOGGER.debug("%s: Subscribe to notifications", self._model_id)
+            try:
+                await client.start_notify(self._notify_char, self._notification_handler)
+                if self._auth_char is not None:
+                    await client.start_notify(self._auth_char, self._notification_handler_auth)
+                await self._authenticate_if_needed()
+            except BleakDBusError as e:
+                _LOGGER.debug("%s: Scale disconnected during setup: %s", self._model_id, e)
+                self._client = None
+                return
 
     async def _authenticate_if_needed(self):
         if self._model_id not in ["eufy T9148", "eufy T9149"]:
