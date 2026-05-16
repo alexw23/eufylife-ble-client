@@ -19,5 +19,5 @@ class EufyLifeBLEState:
     weight_kg: float = None
     final_weight_kg: float = None
     heart_rate: float = None
-    max_weight_exceeded: bool = None
+    weight_limit_exceeded: bool = None
     impedance: int = None
